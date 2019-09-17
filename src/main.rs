@@ -2,7 +2,7 @@ use glam::{ vec2, Vec2, vec3, Vec3 };
 
 use minifb::{ Window, WindowOptions, Key };
 
-use std::sync::mpsc::{ Sender, Receiver };
+use smallvec::{ SmallVec, smallvec };
 
 use rayon::prelude::*;
 
@@ -10,11 +10,77 @@ const WIDTH: usize = 1280;
 const HEIGHT: usize = 960;
 
 const RAYS_PER_UPDATE: usize = 500;
-const DELTA_ANGLE: f32 = 0.0001;
+const EPS_ANGLE: f32 = 0.00001;
+const HIT_THRESHOLD: f32 = 0.0001;
+const NORMAL_EPS: f32 = 0.001;
+const MAX_RAY_DEPTH: usize = 2;
+const MAX_RAY_DISTANCE: f32 = 2000.0;
+
+fn setup_world() -> World {
+
+    let red_diffuse = Lambertian {
+        ior: 0.9,
+        color: vec3(1.0, 0.0, 0.0),
+    };
+
+    let objects: Vec<Box<dyn WorldObject + Send + Sync>> = vec![
+        Box::new(Circle {
+            center: vec2(WIDTH as f32 / 2.0, HEIGHT as f32 / 4.0),
+            radius: HEIGHT as f32 / 8.0,
+            material: Box::new(red_diffuse.clone()),
+        }),
+    ];
+
+    let lights: Vec<Light> = vec![
+        Light {
+            pos: vec2(0.0, 0.0),
+            spectrum: vec3(0.7, 0.7, 0.8),
+            angle: 0.0,
+        },
+    ];
+
+    World { objects, lights }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Lambertian {
+    pub ior: f32,
+    pub color: Vec3,
+}
+
+impl Material for Lambertian {
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, _hit_pos: Vec2, _incident: Vec2, _normal: Vec2, _out: Vec2, _entering: bool) -> Vec3 {
+        ray_spectrum * self.color
+    }
+
+    fn get_ior(&self) -> f32 {
+        self.ior
+    }
+}
+
+struct Circle {
+    pub center: Vec2,
+    pub radius: f32,
+    pub material: Box<dyn Material + Send + Sync>,
+}
+
+impl<'a> WorldObject for Circle {
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: bool) -> Vec3 {
+        self.material.evaluate_brdf(ray_spectrum, hit_pos, incident, normal, out, entering)
+    }
+
+    fn get_ior(&self) -> f32 {
+        self.material.get_ior()
+    }
+
+    fn evaluate_distance(&self, from: Vec2) -> f32 {
+        (from - self.center).length() - self.radius
+    }
+}
 
 fn main() {
     let mut display_buf: Vec<u32> = vec![0; WIDTH * HEIGHT];
-    let mut img_buf: Vec<Vec3> = vec![Vec3::new(0.0, 0.0, 0.0); WIDTH * HEIGHT];
+    let mut img_buf: Vec<Vec3> = vec![vec3(0.0, 0.0, 0.0); WIDTH * HEIGHT];
 
     let mut window = Window::new(
         "rayn2d",
@@ -22,21 +88,13 @@ fn main() {
         HEIGHT,
         WindowOptions::default()).unwrap();
 
-    let objects: Vec<Box<dyn WorldObject + Send + Sync>> = vec![];
-    let lights: Vec<Light> = vec![
-        Light {
-            pos: Vec2::new(0.0, 0.0),
-            spectrum: Vec3::new(0.8, 2.0, 1.0),
-            angle: 0.0,
-        },
-    ];
+    let mut world = setup_world();
     
-    let mut draw_instructions: Vec<DrawInstruction> = Vec::with_capacity(RAYS_PER_UPDATE * lights.len());
-
-    let world = World { objects, lights };
+    //let mut draw_instructions: Vec<DrawInstruction> = Vec::with_capacity(2usize.pow(MAX_RAY_DEPTH as u32) * RAYS_PER_UPDATE * world.lights.len());
+    let mut draw_instructions: Vec<DrawInstruction> = Vec::new();
     
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        update(&world, &mut draw_instructions);
+        update(&mut world, &mut draw_instructions);
 
         draw(&draw_instructions, &mut img_buf);
         draw_instructions.clear();
@@ -47,18 +105,24 @@ fn main() {
     }
 }
 
+fn draw(draw_instructions: &[DrawInstruction], image_buf: &mut Vec<Vec3>) {
+    for instruction in draw_instructions {
+        draw_line(image_buf, instruction.p1, instruction.p2, instruction.spectrum);
+    }
+}
+
 fn update_display(img_buf: &Vec<Vec3>, display_buf: &mut Vec<u32>) {
     for (img_pixel, display_pixel) in img_buf.iter().zip(display_buf.iter_mut()) {
         *display_pixel = vec3_to_u32(*img_pixel);
     }
 }
 
-fn update(world: &World, draw_instructions: &mut Vec<DrawInstruction>) {
-    for light in world.lights {
+fn update(world: &mut World, draw_instructions: &mut Vec<DrawInstruction>) {
+    for light in world.lights.iter() {
         draw_instructions.par_extend(
             rayon::iter::repeat(light).zip(0..RAYS_PER_UPDATE).flat_map(|(light, ray_number)| {
-                let angle = light.angle + ray_number as f32 * DELTA_ANGLE;
-                let ray = Ray::new(light.pos, Vec2::new(angle.cos(), angle.sin()));
+                let angle = light.angle + ray_number as f32 * EPS_ANGLE;
+                let ray = Ray::new(light.pos, vec2(angle.cos(), angle.sin()), light.spectrum, 1.0);
 
                 trace(world, ray).into_par_iter()
             })
@@ -66,26 +130,105 @@ fn update(world: &World, draw_instructions: &mut Vec<DrawInstruction>) {
     }
 
     for light in world.lights.iter_mut() {
-        light.angle += RAYS_PER_UPDATE  as f32 * DELTA_ANGLE;
+        light.angle += RAYS_PER_UPDATE  as f32 * EPS_ANGLE;
     }
 }
 
 fn trace(world: &World, ray: Ray) -> Vec<DrawInstruction> {
     let mut draw_instructions = Vec::new();
 
-    trace_inner(world, ray, &mut draw_instructions, 0);
+    trace_inner(world, ray, &mut draw_instructions);
 
     draw_instructions
 }
 
-fn trace_inner(world: &World, ray: Ray, draw_instructions: &mut Vec<DrawInstruction>, bounces: usize) {
-    while 
+fn trace_inner(world: &World, mut ray: Ray, draw_instructions: &mut Vec<DrawInstruction>) {
+    let mut total_dist_traveled = 0.0;
+
+    loop {
+        let (dist, closest) = dist_to_scene(world, ray.get_pos());
+        total_dist_traveled += dist;
+
+        ray.advance(dist);
+
+        if dist.abs() < HIT_THRESHOLD {
+            let hit_pos = ray.get_pos();
+
+            draw_instructions.push(DrawInstruction {
+                p1: ray.origin,
+                p2: hit_pos,
+                spectrum: ray.spectrum * EPS_ANGLE * 100.0,
+            });
+
+            if ray.depth < MAX_RAY_DEPTH {
+                let normal = estimate_normal(world, hit_pos);
+
+                let entering = ray.dir.dot(normal) < 0.0;
+
+                let reflection = ray.reflect(normal);
+                let refraction = ray.refract(normal, closest.get_ior(), entering);
+                let incident = ray.dir;
+
+                let reflection_ray = Ray::new_from(
+                    &ray,
+                    reflection,
+                    closest.evaluate_brdf(ray.spectrum, hit_pos, incident, normal, reflection, entering),
+                    closest.get_ior(),
+                    entering);
+
+                trace_inner(world, reflection_ray, draw_instructions);
+
+                if let Some(refraction) = refraction {
+                    let refraction_ray = Ray::new_from(
+                        &ray,
+                        reflection,
+                        closest.evaluate_brdf(ray.spectrum, hit_pos, incident, normal, refraction, entering),
+                        closest.get_ior(),
+                        entering);
+
+                    trace_inner(world, refraction_ray, draw_instructions);
+                }
+            }
+            
+            break;
+        }
+
+        if total_dist_traveled >= MAX_RAY_DISTANCE {
+            let hit_pos = ray.get_pos();
+
+            draw_instructions.push(DrawInstruction {
+                p1: ray.origin,
+                p2: hit_pos,
+                spectrum: ray.spectrum * EPS_ANGLE * 100.0,
+            });
+
+            break;
+        }
+    }
 }
 
-fn draw(draw_instructions: &[DrawInstruction], image_buf: &mut Vec<Vec3>) {
-    for instruction in draw_instructions {
-        draw_line(image_buf, instruction.p1, instruction.p2, instruction.spectrum);
+fn dist_to_scene(world: &World, p: Vec2) -> (f32, &dyn WorldObject) {
+    let mut closest: Option<&dyn WorldObject> = None;
+    let mut dist = std::f32::MAX;
+    for object in world.objects.iter() {
+        let obj_dist = object.evaluate_distance(p);
+        if obj_dist < dist {
+            dist = obj_dist;
+            closest = Some(object.as_ref());
+        }
     }
+    (dist, closest.unwrap())
+}
+
+fn estimate_normal(world: &World, p: Vec2) -> Vec2 {
+  let x_p = dist_to_scene(world, vec2(p.x() + NORMAL_EPS, p.y())).0;
+  let x_m = dist_to_scene(world, vec2(p.x() - NORMAL_EPS, p.y())).0;
+  let y_p = dist_to_scene(world, vec2(p.x(), p.y() + NORMAL_EPS)).0;
+  let y_m = dist_to_scene(world, vec2(p.x(), p.y() - NORMAL_EPS)).0;
+  let x_diff = x_p - x_m;
+  let y_diff = y_p - y_m;
+  let vec = vec2(x_diff, y_diff);
+  return vec.normalize();
 }
 
 struct World {
@@ -93,9 +236,14 @@ struct World {
     pub lights: Vec<Light>,
 }
 
+trait Material {
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: bool) -> Vec3;
+    fn get_ior(&self) -> f32;
+}
+
 trait WorldObject {
     fn evaluate_distance(&self, from: Vec2) -> f32;
-    fn evaluate_brdf(&self, ray_in_dir: Vec2, normal: Vec2) -> Vec3;
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: bool) -> Vec3;
     fn get_ior(&self) -> f32;
 }
 
@@ -113,45 +261,95 @@ struct DrawInstruction {
     spectrum: Vec3,
 }
 
-unsafe impl Send for DrawInstruction {}
-
+#[derive(Clone, Debug)]
 struct Ray {
     pub origin: Vec2,
     pub dir: Vec2,
-    pub len: f32
+    pub len: f32,
+    pub spectrum: Vec3,
+    pub depth: usize,
+    pub medium_ior_stack: SmallVec<[f32; MAX_RAY_DEPTH]>,
 }
 
 impl Ray {
-    fn new(origin: Vec2, dir: Vec2) -> Ray { Ray { origin, dir, len: 0f32 } }
+    fn new(origin: Vec2, dir: Vec2, spectrum: Vec3, medium_ior: f32) -> Ray { 
+        Ray {
+            origin,
+            dir,
+            len: 0f32,
+            spectrum,
+            depth: 0,
+            medium_ior_stack: smallvec![medium_ior],
+        }
+    }
+
+    fn new_from(ray: &Ray, dir: Vec2, spectrum: Vec3, medium_ior: f32, entering: bool) -> Ray {
+        let mut medium_ior_stack = ray.medium_ior_stack.clone();
+
+        if entering {
+            medium_ior_stack.push(medium_ior);
+        } else {
+            medium_ior_stack.pop();
+        }
+
+        Ray {
+            origin: ray.get_pos() + 3.0 * HIT_THRESHOLD * dir,
+            dir,
+            len: 0f32,
+            spectrum,
+            depth: ray.depth + 1,
+            medium_ior_stack
+        }
+    }
 
     fn advance(&mut self, dist: f32) { self.len += dist }
     fn get_pos(&self) -> Vec2 { self.origin + self.dir * self.len }
-}
 
+    fn reflect(&self, normal: Vec2) -> Vec2 {
+        self.dir - 2.0 * self.dir.dot(normal) * normal
+    }
+
+    fn refract(&self, normal: Vec2, next_ior: f32, entering: bool) -> Option<Vec2> {
+        let next_ior = if entering {
+            next_ior
+        } else {
+            if self.medium_ior_stack.len() < 2 {
+                return None;
+            }
+            self.medium_ior_stack[self.medium_ior_stack.len() - 2]
+        };
+
+        let eta = next_ior / self.medium_ior_stack.last().unwrap();
+
+        let n_d_i = normal.dot(-self.dir);
+        let k = 1.0 - eta * eta * (1.0 - n_d_i * n_d_i);
+        if k < 0.0 {
+            None
+        } else {
+            Some(eta * self.dir - (eta * n_d_i + k.sqrt()) * normal)
+        }
+    }
+}
 
 // Line drawing algorithm
 
 fn plot(buf: &mut Vec<Vec3>, x: i32, y: i32, a: f64, c: Vec3) {
+    if x >= WIDTH as i32 || x < 0 || y >= HEIGHT as i32 || y < 0 {
+        return;
+    }
+    
     let final_col = a as f32 * c;
 
     let pixel = &mut buf[x as usize + y as usize * WIDTH];
 
-    *pixel += c;
+    *pixel += final_col;
 }
 
 fn vec3_to_u32(vec: Vec3) -> u32 {
-    let r = ((vec.x() * 255.0).max(0.0).min(255.0) as u32) << 16;
-    let g = ((vec.x() * 255.0).max(0.0).min(255.0) as u32) << 8;
-    let b = (vec.x() * 255.0).max(0.0).min(255.0) as u32;
-    return r | g | b;
-}
-
-fn u32_to_vec3(c: u32) -> Vec3 {
-    let r = (c >> 16) as f32 / 255.0;
-    let g = (c & 0x00FF00 >> 8) as f32 / 255.0;
-    let b = (c & 0x0000FF) as f32 / 255.0;
-
-    Vec3::new(r, g, b)
+    let r = (vec.x() * 255.0).max(0.0).min(255.0) as u32;
+    let g = (vec.y() * 255.0).max(0.0).min(255.0) as u32;
+    let b = (vec.z() * 255.0).max(0.0).min(255.0) as u32;
+    return r << 16 | g << 8 | b;
 }
 
 fn ipart(x: f64) -> i32 {
@@ -214,7 +412,7 @@ fn draw_line(buf: &mut Vec<Vec3>, p1: Vec2, p2: Vec2, s: Vec3) {
     }
  
     // first y-intersection for the main loop
-    let intery = yend + gradient;
+    let mut intery = yend + gradient;
  
     // handle second endpoint
     xend = (x1).round();

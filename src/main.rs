@@ -9,11 +9,12 @@ use rayon::prelude::*;
 const WIDTH: usize = 1280;
 const HEIGHT: usize = 960;
 
-const RAYS_PER_UPDATE: usize = 500;
-const EPS_ANGLE: f32 = 0.00001;
+const RAYS_PER_UPDATE: usize = 750;
+const EPS_ANGLE: f32 = 0.0001;
 const HIT_THRESHOLD: f32 = 0.0001;
 const NORMAL_EPS: f32 = 0.001;
-const MAX_RAY_DEPTH: usize = 2;
+const MAX_RAY_DEPTH: usize = 5;
+const MAX_RAY_MARCHES: usize = 1000;
 const MAX_RAY_DISTANCE: f32 = 2000.0;
 
 fn setup_world() -> World {
@@ -28,13 +29,14 @@ fn setup_world() -> World {
             center: vec2(WIDTH as f32 / 2.0, HEIGHT as f32 / 4.0),
             radius: HEIGHT as f32 / 8.0,
             material: Box::new(red_diffuse.clone()),
+            uuid: 0
         }),
     ];
 
     let lights: Vec<Light> = vec![
         Light {
-            pos: vec2(0.0, 0.0),
-            spectrum: vec3(0.7, 0.7, 0.8),
+            pos: vec2(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0),
+            spectrum: vec3(0.3, 0.4, 1.2),
             angle: 0.0,
         },
     ];
@@ -49,7 +51,7 @@ struct Lambertian {
 }
 
 impl Material for Lambertian {
-    fn evaluate_brdf(&self, ray_spectrum: Vec3, _hit_pos: Vec2, _incident: Vec2, _normal: Vec2, _out: Vec2, _entering: bool) -> Vec3 {
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, _hit_pos: Vec2, _incident: Vec2, _normal: Vec2, _out: Vec2, _entering: MediumChange) -> Vec3 {
         ray_spectrum * self.color
     }
 
@@ -62,10 +64,11 @@ struct Circle {
     pub center: Vec2,
     pub radius: f32,
     pub material: Box<dyn Material + Send + Sync>,
+    pub uuid: u64,
 }
 
 impl<'a> WorldObject for Circle {
-    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: bool) -> Vec3 {
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: MediumChange) -> Vec3 {
         self.material.evaluate_brdf(ray_spectrum, hit_pos, incident, normal, out, entering)
     }
 
@@ -75,6 +78,10 @@ impl<'a> WorldObject for Circle {
 
     fn evaluate_distance(&self, from: Vec2) -> f32 {
         (from - self.center).length() - self.radius
+    }
+    
+    fn get_uuid(&self) -> u64 {
+        self.uuid
     }
 }
 
@@ -119,12 +126,20 @@ fn update_display(img_buf: &Vec<Vec3>, display_buf: &mut Vec<u32>) {
 
 fn update(world: &mut World, draw_instructions: &mut Vec<DrawInstruction>) {
     for light in world.lights.iter() {
-        draw_instructions.par_extend(
-            rayon::iter::repeat(light).zip(0..RAYS_PER_UPDATE).flat_map(|(light, ray_number)| {
+        // draw_instructions.par_extend(
+        //     rayon::iter::repeat(light).zip(0..RAYS_PER_UPDATE).flat_map(|(light, ray_number)| {
+        //         let angle = light.angle + ray_number as f32 * EPS_ANGLE;
+        //         let ray = Ray::new(light.pos, vec2(angle.cos(), angle.sin()), light.spectrum, 1.0);
+
+        //         trace(world, ray).into_par_iter()
+        //     })
+        // );
+        draw_instructions.extend(
+            std::iter::repeat(light).zip(0..RAYS_PER_UPDATE).flat_map(|(light, ray_number)| {
                 let angle = light.angle + ray_number as f32 * EPS_ANGLE;
                 let ray = Ray::new(light.pos, vec2(angle.cos(), angle.sin()), light.spectrum, 1.0);
 
-                trace(world, ray).into_par_iter()
+                trace(world, ray).into_iter()
             })
         );
     }
@@ -144,6 +159,8 @@ fn trace(world: &World, ray: Ray) -> Vec<DrawInstruction> {
 
 fn trace_inner(world: &World, mut ray: Ray, draw_instructions: &mut Vec<DrawInstruction>) {
     let mut total_dist_traveled = 0.0;
+    let mut total_marches = 0;
+    let mut prev_dist = 0.0;
 
     loop {
         let (dist, closest) = dist_to_scene(world, ray.get_pos());
@@ -151,41 +168,68 @@ fn trace_inner(world: &World, mut ray: Ray, draw_instructions: &mut Vec<DrawInst
 
         ray.advance(dist);
 
-        if dist.abs() < HIT_THRESHOLD {
+        if dist.abs() < HIT_THRESHOLD && dist != 0.0 {
             let hit_pos = ray.get_pos();
 
             draw_instructions.push(DrawInstruction {
                 p1: ray.origin,
                 p2: hit_pos,
-                spectrum: ray.spectrum * EPS_ANGLE * 100.0,
+                spectrum: ray.spectrum * EPS_ANGLE * 50.0,
             });
 
             if ray.depth < MAX_RAY_DEPTH {
                 let normal = estimate_normal(world, hit_pos);
-
-                let entering = ray.dir.dot(normal) < 0.0;
+                let outside_wall = prev_dist > 0.0;
 
                 let reflection = ray.reflect(normal);
-                let refraction = ray.refract(normal, closest.get_ior(), entering);
+
+                let (refraction_dir, refraction_medium_change) = if outside_wall {
+                    // entering
+                    if let MediumChange::Entering(_, obj) = ray.last_action {
+                        if obj == closest.get_uuid() {
+                            break;
+                        }
+                    }
+
+                    let old_ior = ray.medium_ior_stack.last().unwrap();
+                    let new_ior = closest.get_ior();
+                    (
+                        ray.refract(normal, new_ior / old_ior),
+                        MediumChange::Entering(new_ior, closest.get_uuid()),
+                    )
+                } else {
+                    // exiting
+                    if let MediumChange::Exiting(obj) = ray.last_action {
+                        if obj == closest.get_uuid() {
+                            break;
+                        }
+                    }
+
+                    let old_ior = closest.get_ior();
+                    let new_ior = ray.medium_ior_stack[ray.medium_ior_stack.len() - 2];
+                    (
+                        ray.refract(normal, new_ior / old_ior),
+                        MediumChange::Exiting(closest.get_uuid()),
+                    )
+                };
+
                 let incident = ray.dir;
 
                 let reflection_ray = Ray::new_from(
                     &ray,
                     reflection,
-                    closest.evaluate_brdf(ray.spectrum, hit_pos, incident, normal, reflection, entering),
-                    closest.get_ior(),
-                    entering);
+                    closest.evaluate_brdf(ray.spectrum, hit_pos, incident, normal, reflection, MediumChange::Same),
+                    ray.last_action);
 
                 trace_inner(world, reflection_ray, draw_instructions);
 
-                if let Some(refraction) = refraction {
+                if let Some(refraction) = refraction_dir {
                     let refraction_ray = Ray::new_from(
                         &ray,
-                        reflection,
-                        closest.evaluate_brdf(ray.spectrum, hit_pos, incident, normal, refraction, entering),
-                        closest.get_ior(),
-                        entering);
-
+                        refraction,
+                        closest.evaluate_brdf(ray.spectrum, hit_pos, incident, normal, refraction, refraction_medium_change),
+                        refraction_medium_change);
+                    
                     trace_inner(world, refraction_ray, draw_instructions);
                 }
             }
@@ -193,13 +237,16 @@ fn trace_inner(world: &World, mut ray: Ray, draw_instructions: &mut Vec<DrawInst
             break;
         }
 
-        if total_dist_traveled >= MAX_RAY_DISTANCE {
+        total_marches += 1;
+        prev_dist = dist;
+
+        if total_dist_traveled >= MAX_RAY_DISTANCE || total_marches >= MAX_RAY_MARCHES {
             let hit_pos = ray.get_pos();
 
             draw_instructions.push(DrawInstruction {
                 p1: ray.origin,
                 p2: hit_pos,
-                spectrum: ray.spectrum * EPS_ANGLE * 100.0,
+                spectrum: ray.spectrum * EPS_ANGLE * 50.0,
             });
 
             break;
@@ -237,14 +284,15 @@ struct World {
 }
 
 trait Material {
-    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: bool) -> Vec3;
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, medium_change: MediumChange) -> Vec3;
     fn get_ior(&self) -> f32;
 }
 
 trait WorldObject {
     fn evaluate_distance(&self, from: Vec2) -> f32;
-    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, entering: bool) -> Vec3;
+    fn evaluate_brdf(&self, ray_spectrum: Vec3, hit_pos: Vec2, incident: Vec2, normal: Vec2, out: Vec2, medium_change: MediumChange) -> Vec3;
     fn get_ior(&self) -> f32;
+    fn get_uuid(&self) -> u64;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -261,7 +309,14 @@ struct DrawInstruction {
     spectrum: Vec3,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy)]
+pub enum MediumChange {
+    Entering(f32, u64),
+    Exiting(u64),
+    Same,
+}
+
+#[derive(Clone)]
 struct Ray {
     pub origin: Vec2,
     pub dir: Vec2,
@@ -269,6 +324,7 @@ struct Ray {
     pub spectrum: Vec3,
     pub depth: usize,
     pub medium_ior_stack: SmallVec<[f32; MAX_RAY_DEPTH]>,
+    pub last_action: MediumChange,
 }
 
 impl Ray {
@@ -280,25 +336,31 @@ impl Ray {
             spectrum,
             depth: 0,
             medium_ior_stack: smallvec![medium_ior],
+            last_action: MediumChange::Same,
         }
     }
 
-    fn new_from(ray: &Ray, dir: Vec2, spectrum: Vec3, medium_ior: f32, entering: bool) -> Ray {
+    fn new_from(ray: &Ray, dir: Vec2, spectrum: Vec3, medium_change: MediumChange) -> Ray {
         let mut medium_ior_stack = ray.medium_ior_stack.clone();
 
-        if entering {
-            medium_ior_stack.push(medium_ior);
-        } else {
-            medium_ior_stack.pop();
+        match medium_change {
+            MediumChange::Entering(new_ior, obj_id) => {
+                medium_ior_stack.push(new_ior);
+            },
+            MediumChange::Exiting(_) => {
+                medium_ior_stack.pop();
+            },
+            MediumChange::Same => ()
         }
 
         Ray {
-            origin: ray.get_pos() + 3.0 * HIT_THRESHOLD * dir,
+            origin: ray.get_pos() + 2.0 * HIT_THRESHOLD * dir,
             dir,
             len: 0f32,
             spectrum,
             depth: ray.depth + 1,
-            medium_ior_stack
+            medium_ior_stack,
+            last_action: medium_change,
         }
     }
 
@@ -309,18 +371,7 @@ impl Ray {
         self.dir - 2.0 * self.dir.dot(normal) * normal
     }
 
-    fn refract(&self, normal: Vec2, next_ior: f32, entering: bool) -> Option<Vec2> {
-        let next_ior = if entering {
-            next_ior
-        } else {
-            if self.medium_ior_stack.len() < 2 {
-                return None;
-            }
-            self.medium_ior_stack[self.medium_ior_stack.len() - 2]
-        };
-
-        let eta = next_ior / self.medium_ior_stack.last().unwrap();
-
+    fn refract(&self, normal: Vec2, eta: f32) -> Option<Vec2> {
         let n_d_i = normal.dot(-self.dir);
         let k = 1.0 - eta * eta * (1.0 - n_d_i * n_d_i);
         if k < 0.0 {

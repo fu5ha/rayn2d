@@ -111,21 +111,19 @@ fn main() {
 fn update(state: &mut TracerState, world: &mut World, draw_instructions: &mut Vec<DrawInstruction>) {
     let indices = state.ray_index_vec.split_off(state.ray_index_vec.len() - RAYS_PER_UPDATE);
     for light in world.lights.iter() {
+        // Multi-threaded
         draw_instructions.par_extend(
             rayon::iter::repeat(light).zip(indices.par_iter()).flat_map(|(light, ray_number)| {
                 let mut rng = rand::thread_rng();
                 trace(world, light.get_ray(*ray_number, &mut rng)).into_par_iter()
             })
         );
-        // draw_instructions.extend(
-        //     std::iter::repeat(light).zip(0..RAYS_PER_UPDATE).flat_map(|(light, ray_number)| {
-        //         let angle = light.angle + ray_number as f32 * EPS_ANGLE;
-        //         if angle > std::f32::consts::PI * 2.0 {
-        //             return Vec::new().into_iter()
-        //         }
-        //         let ray = Ray::new(light.pos, vec2(angle.cos(), angle.sin()).normalize(), light.spectrum, 1.0);
 
-        //         trace::trace(world, ray).into_iter()
+        // Single-threaded
+        // draw_instructions.extend(
+        //     std::iter::repeat(light).zip(indices.iter()).flat_map(|(light, ray_number)| {
+        //         let mut rng = rand::thread_rng();
+        //         trace(world, light.get_ray(*ray_number, &mut rng)).into_iter()
         //     })
         // );
     }

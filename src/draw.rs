@@ -1,6 +1,9 @@
 use crate::consts::*;
 use crate::trace::TracerState;
 
+#[cfg(feature = "profile")]
+use thread_profiler::profile_scope;
+
 use glam::{ Vec2, vec3, Vec3 };
 
 #[derive(Copy, Clone, Debug)]
@@ -11,6 +14,8 @@ pub struct DrawInstruction {
 }
 
 pub fn draw(draw_instructions: &[DrawInstruction], image_buf: &mut Vec<Vec3>) {
+    #[cfg(feature = "profile")]
+    profile_scope!("draw");
     for instruction in draw_instructions {
         draw_line(image_buf, instruction.p1, instruction.p2, instruction.spectrum);
     }
@@ -39,7 +44,7 @@ pub fn update_display(state: &TracerState, final_buf: &Vec<Vec3>, scratch_buf: &
 
 // Line drawing algorithm
 
-fn plot(buf: &mut Vec<Vec3>, x: i32, y: i32, a: f64, c: Vec3) {
+fn plot(buf: &mut Vec<Vec3>, x: i32, y: i32, a: f32, c: Vec3) {
     if x >= WIDTH as i32 || x < 0 || y >= HEIGHT as i32 || y < 0 {
         return;
     }
@@ -58,23 +63,26 @@ fn vec3_to_u32(vec: Vec3) -> u32 {
     return r << 16 | g << 8 | b;
 }
 
-fn ipart(x: f64) -> i32 {
+fn ipart(x: f32) -> i32 {
     x as i32
 }
 
-fn fpart(x: f64) -> f64 {
+fn fpart(x: f32) -> f32 {
     x - x.floor()
 }
  
-fn rfpart(x: f64) -> f64 {
+fn rfpart(x: f32) -> f32 {
     1.0 - fpart(x)
 }
  
 fn draw_line(buf: &mut Vec<Vec3>, p1: Vec2, p2: Vec2, s: Vec3) {
-    let mut x0 = p1.x() as f64;
-    let mut x1 = p2.x() as f64;
-    let mut y0 = p1.y() as f64;
-    let mut y1 = p2.y() as f64;
+    #[cfg(feature = "profile")]
+    profile_scope!("draw_line");
+
+    let mut x0 = p1.x() as f32;
+    let mut x1 = p2.x() as f32;
+    let mut y0 = p1.y() as f32;
+    let mut y1 = p2.y() as f32;
     let steep = (y1 - y0).abs() > (x1 - x0).abs();
     if steep {
       let mut t = x0;
@@ -99,7 +107,6 @@ fn draw_line(buf: &mut Vec<Vec3>, p1: Vec2, p2: Vec2, s: Vec3) {
     let gradient = dy / dx;
     
     let angle = dy.atan2(dx);
-
     let m = 1.0 + 0.5 * (-(2.0 * angle).cos() + 1.0);
 
     // handle first endpoint
@@ -136,14 +143,17 @@ fn draw_line(buf: &mut Vec<Vec3>, p1: Vec2, p2: Vec2, s: Vec3) {
     }
  
     // main loop
-    for x in (xpxl1 as i32 + 1)..(xpxl2 as i32 - 1) {
-        if steep {
+    if steep {
+        for x in (xpxl1 as i32 + 1)..(xpxl2 as i32 - 1) {
             plot(buf, ipart(intery), x, rfpart(intery) * m, s);
             plot(buf, ipart(intery) + 1, x, fpart(intery) * m, s);
-        } else {
+            intery = intery + gradient;
+        }
+    } else {
+        for x in (xpxl1 as i32 + 1)..(xpxl2 as i32 - 1) {
             plot(buf, x, ipart(intery), rfpart(intery) * m, s);
             plot(buf, x, ipart(intery) + 1, fpart(intery) * m, s);
+            intery = intery + gradient;
         }
-        intery = intery + gradient;
     }
 }

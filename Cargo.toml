@@ -12,6 +12,12 @@ minifb = "0.13"
 rayon = "1.2"
 smallvec = "0.6"
 rand = "0.7"
+image = "0.22"
+thread_profiler = { version = "0.3", optional = true }
+
+[features]
+default = []
+profile = ["thread_profiler"]
 
 [profile.release]
 debug = true

@@ -2,6 +2,9 @@ use crate::world::*;
 use crate::consts::*;
 use crate::draw::DrawInstruction;
 
+#[cfg(feature = "profile")]
+use thread_profiler::profile_scope;
+
 use glam::{ vec2, Vec2, Vec3 };
 
 use smallvec::{ smallvec, SmallVec };
@@ -13,6 +16,9 @@ pub struct TracerState {
 }
 
 pub fn trace(world: &World, ray: Ray) -> Vec<DrawInstruction> {
+    #[cfg(feature = "profile")]
+    profile_scope!("trace");
+
     let mut draw_instructions = Vec::new();
 
     trace_inner(world, ray, &mut draw_instructions);
@@ -94,14 +100,14 @@ fn dist_to_scene(world: &World, p: Vec2) -> (f32, &dyn WorldObject) {
 }
 
 fn estimate_normal(world: &World, p: Vec2, relation: Relation) -> Vec2 {
-  let x_p = dist_to_scene(world, vec2(p.x() + NORMAL_EPS, p.y())).0;
-  let x_m = dist_to_scene(world, vec2(p.x() - NORMAL_EPS, p.y())).0;
-  let y_p = dist_to_scene(world, vec2(p.x(), p.y() + NORMAL_EPS)).0;
-  let y_m = dist_to_scene(world, vec2(p.x(), p.y() - NORMAL_EPS)).0;
-  let x_diff = x_p - x_m;
-  let y_diff = y_p - y_m;
-  let vec = vec2(x_diff, y_diff);
-  return vec.normalize() * if let Relation::Inside = relation { -1.0 } else { 1.0 };
+    let x_p = dist_to_scene(world, vec2(p.x() + NORMAL_EPS, p.y())).0;
+    let x_m = dist_to_scene(world, vec2(p.x() - NORMAL_EPS, p.y())).0;
+    let y_p = dist_to_scene(world, vec2(p.x(), p.y() + NORMAL_EPS)).0;
+    let y_m = dist_to_scene(world, vec2(p.x(), p.y() - NORMAL_EPS)).0;
+    let x_diff = x_p - x_m;
+    let y_diff = y_p - y_m;
+    let vec = vec2(x_diff, y_diff);
+    return vec.normalize() * if let Relation::Inside = relation { -1.0 } else { 1.0 };
 }
 
 #[derive(Clone, Copy)]

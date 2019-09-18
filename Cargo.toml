@@ -11,6 +11,7 @@ glam = "0.7"
 minifb = "0.13"
 rayon = "1.2"
 smallvec = "0.6"
+rand = "0.7"
 
 [profile.release]
 debug = true

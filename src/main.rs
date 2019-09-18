@@ -50,17 +50,17 @@ fn setup_world() -> World {
     let lights: Vec<Box<dyn Light>> = vec![
         Box::new(PointLight {
             pos: vec2(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0),
-            spectrum: vec3(1.0, 0.4, 0.2) * 100.0,
+            spectrum: vec3(1.0, 0.4, 0.2) * 50.0,
             angle: 0.0,
         }),
         Box::new(PointLight {
             pos: vec2(WIDTH as f32 / 8.0, HEIGHT as f32 / 8.0),
-            spectrum: vec3(0.5, 0.4, 1.2) * 100.0,
+            spectrum: vec3(0.5, 0.4, 1.2) * 150.0,
             angle: 0.0,
         }),
         Box::new(PointLight {
             pos: vec2(WIDTH as f32 - WIDTH as f32 / 8.0, HEIGHT as f32 / 8.0),
-            spectrum: vec3(1.0, 1.5, 0.6) * 100.0,
+            spectrum: vec3(1.0, 1.5, 0.6) * 150.0,
             angle: 0.0,
         }),
     ];

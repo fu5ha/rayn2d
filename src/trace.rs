@@ -6,6 +6,12 @@ use glam::{ vec2, Vec2, Vec3 };
 
 use smallvec::{ smallvec, SmallVec };
 
+pub struct TracerState {
+    pub current_ray_count: usize,
+    pub ray_index_vec: Vec<usize>,
+    pub current_sample_count: usize,
+}
+
 pub fn trace(world: &World, ray: Ray) -> Vec<DrawInstruction> {
     let mut draw_instructions = Vec::new();
 
@@ -32,7 +38,7 @@ fn trace_inner(world: &World, mut ray: Ray, draw_instructions: &mut Vec<DrawInst
             draw_instructions.push(DrawInstruction {
                 p1: ray.origin,
                 p2: hit_pos,
-                spectrum: ray.spectrum * EPS_ANGLE * 10.0,
+                spectrum: ray.spectrum,
             });
 
             if ray.depth < MAX_RAY_DEPTH {
@@ -66,7 +72,7 @@ fn trace_inner(world: &World, mut ray: Ray, draw_instructions: &mut Vec<DrawInst
             draw_instructions.push(DrawInstruction {
                 p1: ray.origin,
                 p2: ray.get_pos(),
-                spectrum: ray.spectrum * EPS_ANGLE * 10.0,
+                spectrum: ray.spectrum,
             });
 
             break;

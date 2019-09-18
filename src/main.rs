@@ -4,8 +4,6 @@ use minifb::{ Window, WindowOptions, Key };
 
 use rayon::prelude::*;
 
-use rand::prelude::*;
-
 mod consts;
 mod draw;
 mod light;
@@ -52,17 +50,17 @@ fn setup_world() -> World {
     let lights: Vec<Box<dyn Light>> = vec![
         Box::new(PointLight {
             pos: vec2(WIDTH as f32 / 2.0, HEIGHT as f32 / 2.0),
-            spectrum: vec3(1.0, 0.4, 0.2),
+            spectrum: vec3(1.0, 0.4, 0.2) * 100.0,
             angle: 0.0,
         }),
         Box::new(PointLight {
             pos: vec2(WIDTH as f32 / 8.0, HEIGHT as f32 / 8.0),
-            spectrum: vec3(0.5, 0.4, 1.2),
+            spectrum: vec3(0.5, 0.4, 1.2) * 100.0,
             angle: 0.0,
         }),
         Box::new(PointLight {
             pos: vec2(WIDTH as f32 - WIDTH as f32 / 8.0, HEIGHT as f32 / 8.0),
-            spectrum: vec3(1.0, 1.5, 0.6),
+            spectrum: vec3(1.0, 1.5, 0.6) * 100.0,
             angle: 0.0,
         }),
     ];
@@ -72,7 +70,8 @@ fn setup_world() -> World {
 
 fn main() {
     let mut display_buf: Vec<u32> = vec![0; WIDTH * HEIGHT];
-    let mut img_buf: Vec<Vec3> = vec![vec3(0.0, 0.0, 0.0); WIDTH * HEIGHT];
+    let mut final_img_buf: Vec<Vec3> = vec![vec3(0.0, 0.0, 0.0); WIDTH * HEIGHT];
+    let mut scratch_img_buf: Vec<Vec3> = vec![vec3(0.0, 0.0, 0.0); WIDTH * HEIGHT];
 
     let mut window = Window::new(
         "rayn2d",
@@ -83,26 +82,39 @@ fn main() {
     let mut world = setup_world();
     
     let mut draw_instructions: Vec<DrawInstruction> = Vec::new();
+
+    let mut rng = rand::thread_rng();
+    let mut tracer_state = TracerState {
+        current_ray_count: 0,
+        ray_index_vec: rand::seq::index::sample(&mut rng, RAYS_PER_SAMPLE, RAYS_PER_SAMPLE).into_vec(),
+        current_sample_count: 0,
+    };
     
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        update(&mut world, &mut draw_instructions);
+        update(&mut tracer_state, &mut world, &mut draw_instructions);
 
-        draw(&draw_instructions, &mut img_buf);
+        draw(&draw_instructions, &mut scratch_img_buf);
         draw_instructions.clear();
 
-        update_display(&mut img_buf, &mut display_buf);
-
+        update_display(&tracer_state, &mut final_img_buf, &mut scratch_img_buf, &mut display_buf);
         window.update_with_buffer(&display_buf).unwrap();
+
+        if tracer_state.current_ray_count == RAYS_PER_SAMPLE {
+            consolidate(&mut final_img_buf, &mut scratch_img_buf, tracer_state.current_sample_count);
+            tracer_state.current_ray_count = 0;
+            tracer_state.ray_index_vec = rand::seq::index::sample(&mut rng, RAYS_PER_SAMPLE, RAYS_PER_SAMPLE).into_vec();
+            tracer_state.current_sample_count += 1;
+        }
     }
 }
 
-fn update(world: &mut World, draw_instructions: &mut Vec<DrawInstruction>) {
+fn update(state: &mut TracerState, world: &mut World, draw_instructions: &mut Vec<DrawInstruction>) {
+    let indices = state.ray_index_vec.split_off(state.ray_index_vec.len() - RAYS_PER_UPDATE);
     for light in world.lights.iter() {
         draw_instructions.par_extend(
-            rayon::iter::repeat(light).zip(0..RAYS_PER_UPDATE).flat_map(|(light, _ray_number)| {
-                let seed = rand::thread_rng().gen::<f32>();
-
-                trace(world, light.get_ray(seed)).into_par_iter()
+            rayon::iter::repeat(light).zip(indices.par_iter()).flat_map(|(light, ray_number)| {
+                let mut rng = rand::thread_rng();
+                trace(world, light.get_ray(*ray_number, &mut rng)).into_par_iter()
             })
         );
         // draw_instructions.extend(
@@ -117,6 +129,7 @@ fn update(world: &mut World, draw_instructions: &mut Vec<DrawInstruction>) {
         //     })
         // );
     }
+    state.current_ray_count += RAYS_PER_UPDATE;
 }
 
 

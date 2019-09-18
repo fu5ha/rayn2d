@@ -1,6 +1,7 @@
 use crate::consts::*;
+use crate::trace::TracerState;
 
-use glam::{ Vec2, Vec3 };
+use glam::{ Vec2, vec3, Vec3 };
 
 #[derive(Copy, Clone, Debug)]
 pub struct DrawInstruction {
@@ -15,9 +16,24 @@ pub fn draw(draw_instructions: &[DrawInstruction], image_buf: &mut Vec<Vec3>) {
     }
 }
 
-pub fn update_display(img_buf: &Vec<Vec3>, display_buf: &mut Vec<u32>) {
-    for (img_pixel, display_pixel) in img_buf.iter().zip(display_buf.iter_mut()) {
-        *display_pixel = vec3_to_u32(*img_pixel);
+pub fn consolidate(final_buf: &mut Vec<Vec3>, scratch_buf: &mut Vec<Vec3>, sample_count: usize) {
+    let opacity = 1.0 / (sample_count as f32 + 1.0);
+    for (scratch_pixel, final_pixel) in scratch_buf.iter_mut().zip(final_buf.iter_mut()) {
+        *final_pixel = *final_pixel * (1.0 - opacity) + *scratch_pixel * opacity;
+        *scratch_pixel = vec3(0.0, 0.0, 0.0);
+    }
+}
+
+pub fn update_display(state: &TracerState, final_buf: &Vec<Vec3>, scratch_buf: &Vec<Vec3>, display_buf: &mut Vec<u32>) {
+    let opacity = if state.current_sample_count > 0 {
+        let full_opacity = 1.0 / (state.current_sample_count as f32 + 1.0);
+        state.current_ray_count as f32 / RAYS_PER_SAMPLE as f32 * full_opacity
+    } else {
+        1.0
+    };
+    for ((scratch_pixel, final_pixel), display_pixel) in scratch_buf.iter().zip(final_buf.iter()).zip(display_buf.iter_mut()) {
+        let pixel = *final_pixel * (1.0 - opacity) + *scratch_pixel * opacity;
+        *display_pixel = vec3_to_u32(pixel);
     }
 }
 
